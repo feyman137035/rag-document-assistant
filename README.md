@@ -170,7 +170,11 @@ rag-document-assistant/
 # Verify format: [User]: question, [Assistant]: answer
 ```
 
-## 🐛 Known Limitations
+## � Note on Deployment
+
+This app runs a fully local LLM stack (Ollama + Mistral) which requires a GPU/CPU environment with Ollama installed. For a hosted demo, clone the repo and run locally — setup takes under 5 minutes. A cloud version using Groq's free API (llama3) is on the roadmap.
+
+## �🐛 Known Limitations
 
 - **Scanned PDFs**: Image-only PDFs cannot be processed (requires OCR integration)
 - **Large Documents**: Processing time scales with document size
