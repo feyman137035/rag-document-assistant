@@ -32,40 +32,76 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "doc_processed" not in st.session_state:
     st.session_state.doc_processed = False
+if "loaded_documents" not in st.session_state:
+    st.session_state.loaded_documents = []
 
 
-def process_document(uploaded_file):
+def process_documents(uploaded_files):
     """
-    Process uploaded PDF: load, split, embed, and build RAG chain.
-    Uses Google Generative AI embeddings and Gemini LLM.
+    Process multiple uploaded PDFs: load, split, embed, and build RAG chain.
+    Merges chunks from all documents into a single FAISS vector store.
     """
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.getbuffer())
-        tmp_path = tmp_file.name
+    all_chunks = []
+    loaded_filenames = []
+    failed_files = []
 
-    with st.spinner("Processing document..."):
-        # Load PDF
-        loader = PyPDFLoader(tmp_path)
-        docs = loader.load()
-        st.info(f"Loaded {len(docs)} pages")
+    with st.spinner("Processing documents..."):
+        for uploaded_file in uploaded_files:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                tmp_file.write(uploaded_file.getbuffer())
+                tmp_path = tmp_file.name
 
-        # Split into chunks
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50
-        )
-        chunks = splitter.split_documents(docs)
-        st.info(f"Split into {len(chunks)} chunks")
+            try:
+                # Load PDF
+                loader = PyPDFLoader(tmp_path)
+                docs = loader.load()
+                st.info(f"Loaded {len(docs)} pages from {uploaded_file.name}")
+
+                # Split into chunks
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=500,
+                    chunk_overlap=50
+                )
+                chunks = splitter.split_documents(docs)
+                st.info(f"Split into {len(chunks)} chunks from {uploaded_file.name}")
+
+                # Check if any chunks were created
+                if not chunks:
+                    st.warning(f"No text extracted from {uploaded_file.name} (may be scanned). Skipping.")
+                    failed_files.append(uploaded_file.name)
+                    Path(tmp_path).unlink()
+                    continue
+
+                # Add source filename to metadata
+                for chunk in chunks:
+                    chunk.metadata["source"] = uploaded_file.name
+
+                all_chunks.extend(chunks)
+                loaded_filenames.append(uploaded_file.name)
+
+                # Clean up temp file
+                Path(tmp_path).unlink()
+
+            except Exception as e:
+                st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+                failed_files.append(uploaded_file.name)
+                if Path(tmp_path).exists():
+                    Path(tmp_path).unlink()
+                continue
 
         # Check if any chunks were created
-        if not chunks:
-            st.error("No text could be extracted from this PDF. It may be a scanned document or contain only images.")
-            st.info("Try a different PDF with selectable text.")
+        if not all_chunks:
+            st.error("No text could be extracted from any PDF. They may be scanned documents or contain only images.")
+            st.info("Try PDFs with selectable text.")
             return
+
+        # Show warning for failed files
+        if failed_files:
+            st.warning(f"Failed to process: {', '.join(failed_files)}")
 
         # Create embeddings using HuggingFace (free, reliable)
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vectorstore = FAISS.from_documents(chunks, embeddings)
+        vectorstore = FAISS.from_documents(all_chunks, embeddings)
 
         # Create retriever
         retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
@@ -92,11 +128,9 @@ def process_document(uploaded_file):
         st.session_state.chain = chain
         st.session_state.doc_processed = True
         st.session_state.chat_history = []
+        st.session_state.loaded_documents = loaded_filenames
 
-        # Clean up temp file
-        Path(tmp_path).unlink()
-
-    st.success("Document ready! Ask me anything.")
+    st.success(f"{len(loaded_filenames)} document(s) ready! Ask me anything.")
 
 
 def format_sources(source_documents):
@@ -112,13 +146,21 @@ def format_sources(source_documents):
 # Sidebar
 with st.sidebar:
     st.title("📄 RAG Document Assistant")
-    st.markdown("Upload a PDF and ask questions about its content using AI.")
+    st.markdown("Upload PDFs and ask questions about their content using AI.")
 
     st.markdown("---")
     st.markdown("### Instructions")
-    st.markdown("1. Upload a PDF")
+    st.markdown("1. Upload PDF(s)")
     st.markdown("2. Wait for processing")
     st.markdown("3. Ask questions")
+
+    st.markdown("---")
+
+    # Show loaded documents
+    if st.session_state.loaded_documents:
+        st.markdown(f"### 📂 {len(st.session_state.loaded_documents)} document(s) loaded")
+        for filename in st.session_state.loaded_documents:
+            st.markdown(f"- {filename}")
 
     st.markdown("---")
 
@@ -127,20 +169,43 @@ with st.sidebar:
         if st.session_state.chain:
             with st.spinner("Generating summary..."):
                 result = st.session_state.chain.invoke(
-                    {"question": "Give me a structured summary of all key points in this document"}
+                    {"question": "Give me a structured summary of all key points in these documents"}
                 )
                 st.markdown("### Summary")
                 st.markdown(result["answer"])
+
+    st.markdown("---")
+
+    # Clear conversation button
+    if st.button("🗑️ Clear Conversation", disabled=not st.session_state.doc_processed):
+        st.session_state.chat_history = []
+        if st.session_state.chain:
+            st.session_state.chain.memory.clear()
+        st.info("Conversation cleared.")
+        st.rerun()
+
+    # Export chat button
+    if st.session_state.chat_history:
+        chat_text = ""
+        for msg in st.session_state.chat_history:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            chat_text += f"[{role}]: {msg['content']}\n\n"
+        st.download_button(
+            label="📥 Download Chat",
+            data=chat_text,
+            file_name="chat_history.txt",
+            mime="text/plain"
+        )
 
 
 # Main content
 st.title("Chat with Your Document")
 
 # File upload
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+uploaded_files = st.file_uploader("Upload PDF file(s)", type=["pdf"], accept_multiple_files=True)
 
-if uploaded_file:
-    process_document(uploaded_file)
+if uploaded_files:
+    process_documents(uploaded_files)
 
 # Chat interface
 if st.session_state.doc_processed:
@@ -166,6 +231,13 @@ if st.session_state.doc_processed:
                 source_docs = result.get("source_documents", [])
 
                 st.markdown(answer)
+
+                # Confidence indicator
+                unique_pages = len(set(doc.metadata.get("page", 0) for doc in source_docs))
+                if unique_pages < 2:
+                    st.warning("⚠️ Low confidence — limited relevant content found")
+                else:
+                    st.success("✅ High confidence — answer grounded in multiple sources")
 
                 # Show sources
                 if source_docs:
